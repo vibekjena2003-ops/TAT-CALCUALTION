@@ -1,0 +1,307 @@
+import React from "react";
+import * as XLSX from "xlsx";
+
+export default function TATCalculator() {
+  const [dateTime, setDateTime] = React.useState("");
+  const [result4, setResult4] = React.useState("");
+  const [result24, setResult24] = React.useState("");
+  const [bulkResults, setBulkResults] = React.useState([]);
+
+  const WORK_START = 10;
+  const WORK_END = 19;
+
+  const addBusinessHours = (startDate, hoursToAdd) => {
+    let current = new Date(startDate);
+    let remainingMinutes = hoursToAdd * 60;
+
+    while (remainingMinutes > 0) {
+      // Skip Sunday
+      if (current.getDay() === 0) {
+        current.setDate(current.getDate() + 1);
+        current.setHours(WORK_START, 0, 0, 0);
+        continue;
+      }
+
+      // Before working hours
+      if (current.getHours() < WORK_START) {
+        current.setHours(WORK_START, 0, 0, 0);
+      }
+
+      // After working hours
+      if (
+        current.getHours() > WORK_END ||
+        (current.getHours() === WORK_END && current.getMinutes() > 0)
+      ) {
+        current.setDate(current.getDate() + 1);
+        current.setHours(WORK_START, 0, 0, 0);
+        continue;
+      }
+
+      const endOfDay = new Date(current);
+      endOfDay.setHours(WORK_END, 0, 0, 0);
+
+      const availableMinutes = Math.floor(
+        (endOfDay - current) / (1000 * 60)
+      );
+
+      if (remainingMinutes <= availableMinutes) {
+        current = new Date(
+          current.getTime() + remainingMinutes * 60 * 1000
+        );
+        remainingMinutes = 0;
+      } else {
+        remainingMinutes -= availableMinutes;
+        current.setDate(current.getDate() + 1);
+        current.setHours(WORK_START, 0, 0, 0);
+      }
+    }
+
+    return current;
+  };
+
+  // Calculate using 24-hour format internally and display in 12-hour AM/PM format
+  const formatDate = (date) => {
+    const day = String(date.getDate()).padStart(2, "0");
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const year = date.getFullYear();
+
+    let hours = date.getHours();
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+    const ampm = hours >= 12 ? "PM" : "AM";
+
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+
+    return `${day}-${month}-${year} ${String(hours).padStart(2, "0")}:${minutes} ${ampm}`;
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+
+    reader.onload = (evt) => {
+      const data = evt.target.result;
+      const workbook = XLSX.read(data, { type: "binary" });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const jsonData = XLSX.utils.sheet_to_json(sheet);
+
+      const processed = jsonData.map((row, index) => {
+        // Handle Excel date format correctly
+        let excelDate = row["CREATED DATE & TIME"];
+        let created;
+
+        if (typeof excelDate === "number") {
+          // Proper Excel date & time conversion in local format
+          const parsedDate = XLSX.SSF.parse_date_code(excelDate);
+
+          created = new Date(
+            parsedDate.y,
+            parsedDate.m - 1,
+            parsedDate.d,
+            parsedDate.H,
+            parsedDate.M,
+            parsedDate.S
+          );
+        } else {
+          created = new Date(excelDate);
+        }
+
+        const tat4 = addBusinessHours(created, 4);
+
+        const tat24 = new Date(created);
+        tat24.setDate(tat24.getDate() + 1);
+
+        if (tat24.getDay() === 0) {
+          tat24.setDate(tat24.getDate() + 1);
+        }
+
+        const now = new Date();
+
+        return {
+          "WORK ORDER": row["WORK ORDER"] || `WO-${index + 1}`,
+          "CREATED DATE & TIME": created.toLocaleString("en-GB", {
+            hour12: false,
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          }).replace(",", ""),
+          "4 HRS TAT STATUS": now <= tat4 ? "WITHIN 4 HRS" : "CROSSED",
+          "4 HRS TAT DATE & TIME": formatDate(tat4),
+          "24 HRS TAT STATUS": now <= tat24 ? "WITHIN 24 HRS" : "CROSSED",
+          "24 HRS TAT DATE & TIME": formatDate(tat24),
+        };
+      });
+
+      setBulkResults(processed);
+    };
+
+    reader.readAsBinaryString(file);
+  };
+
+  const downloadExcel = () => {
+    if (bulkResults.length === 0) {
+      alert("No data available to download");
+      return;
+    }
+
+    const worksheet = XLSX.utils.json_to_sheet(bulkResults);
+    const workbook = XLSX.utils.book_new();
+
+    XLSX.utils.book_append_sheet(workbook, worksheet, "TAT Report");
+
+    // Generate Excel file buffer
+    const excelBuffer = XLSX.write(workbook, {
+      bookType: "xlsx",
+      type: "array",
+    });
+
+    // Create Blob
+    const data = new Blob([excelBuffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8",
+    });
+
+    // Create download link
+    const url = window.URL.createObjectURL(data);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.setAttribute("download", "TAT_Report.xlsx");
+
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const calculateTAT = () => {
+    if (!dateTime) {
+      alert("Creation date & time will auto pick from Excel upload");
+      return;
+    }
+
+    const start = new Date(dateTime);
+
+    const tat4 = addBusinessHours(start, 4);
+    // 24 Hours TAT = next working day same time
+    const tat24 = new Date(start);
+
+    tat24.setDate(tat24.getDate() + 1);
+
+    // If next day is Sunday, move to Monday
+    if (tat24.getDay() === 0) {
+      tat24.setDate(tat24.getDate() + 1);
+    }
+
+    setResult4(formatDate(tat4)); // Display in 12 hrs format
+    setResult24(formatDate(tat24)); // Display in 12 hrs format
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-800 flex items-center justify-center p-6">
+      <div className="bg-white/95 backdrop-blur-xl shadow-2xl rounded-3xl p-8 w-full max-w-7xl border border-white/20">
+        <div className="flex items-center justify-center mb-4">
+          <div className="bg-gradient-to-r from-blue-600 to-cyan-500 text-white px-6 py-2 rounded-full text-sm font-semibold shadow-lg">
+            Smart Business TAT Tracker
+          </div>
+        </div>
+
+        <h1 className="text-5xl font-extrabold text-center mb-3 bg-gradient-to-r from-blue-700 to-cyan-500 bg-clip-text text-transparent">
+          TAT Calculator
+        </h1>
+
+        <p className="text-center text-gray-600 mb-10 text-lg leading-relaxed">
+          Calculate 4 Hours and 24 Hours TAT between 10:00 AM to 7:00 PM
+        </p>
+
+        <div className="space-y-8">
+          <div className="bg-gradient-to-r from-slate-50 to-blue-50 border border-blue-100 rounded-2xl p-6 shadow-sm">
+            <label className="block text-base font-semibold text-slate-700 mb-3">
+              Upload Excel / CSV File
+            </label>
+            <input
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              onChange={handleFileUpload}
+              className="w-full border-2 border-dashed border-blue-300 bg-white rounded-2xl px-4 py-4 text-slate-700 file:bg-blue-600 file:text-white file:border-0 file:px-4 file:py-2 file:rounded-lg file:mr-4 hover:border-blue-500 transition-all duration-300 cursor-pointer"
+            />
+          </div>
+          
+
+          <button
+            onClick={calculateTAT}
+            className="w-full bg-gradient-to-r from-blue-700 to-cyan-500 text-white py-4 rounded-2xl text-lg font-bold shadow-xl hover:scale-[1.01] hover:shadow-2xl transition-all duration-300"
+          >
+            Calculate TAT
+          </button>
+
+          {bulkResults.length > 0 && (
+            <div className="flex justify-end mt-4">
+              <button
+                type="button"
+                onClick={downloadExcel}
+                className="bg-gradient-to-r from-emerald-600 to-green-500 text-white px-6 py-3 rounded-2xl font-bold shadow-lg hover:scale-105 transition-all duration-300"
+              >
+                Download Excel
+              </button>
+            </div>
+          )}
+
+          {bulkResults.length > 0 && (
+            <div className="overflow-auto border border-slate-200 rounded-3xl mt-8 shadow-2xl bg-white">
+              <table className="w-full text-sm border-collapse overflow-hidden">
+                <thead className="bg-gradient-to-r from-blue-700 to-cyan-500 text-white">
+                  <tr>
+                    <th className="border border-white/20 p-4 text-sm font-bold tracking-wide">WORK ORDER</th>
+                    <th className="border border-white/20 p-4 text-sm font-bold tracking-wide">CREATED DATE & TIME</th>
+                    <th className="border border-white/20 p-4 text-sm font-bold tracking-wide">4 HRS TAT STATUS</th>
+                    <th className="border border-white/20 p-4 text-sm font-bold tracking-wide">4 HRS TAT DATE & TIME</th>
+                    <th className="border border-white/20 p-4 text-sm font-bold tracking-wide">24 HRS TAT STATUS</th>
+                    <th className="border border-white/20 p-4 text-sm font-bold tracking-wide">24 HRS TAT DATE & TIME</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bulkResults.map((item, index) => (
+                    <tr key={index}>
+                      <td className="border border-slate-200 p-4 text-slate-700">{item["WORK ORDER"]}</td>
+                      <td className="border border-slate-200 p-4 text-slate-700">{item["CREATED DATE & TIME"]}</td>
+                      <td className="border border-slate-200 p-4 font-bold">{item["4 HRS TAT STATUS"]}</td>
+                      <td className="border border-slate-200 p-4 text-slate-700">{item["4 HRS TAT DATE & TIME"]}</td>
+                      <td className="border border-slate-200 p-4 font-bold">{item["24 HRS TAT STATUS"]}</td>
+                      <td className="border border-slate-200 p-4 text-slate-700">{item["24 HRS TAT DATE & TIME"]}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {(result4 || result24) && (
+            <div className="grid md:grid-cols-2 gap-6 mt-8">
+              <div className="bg-gradient-to-br from-blue-50 to-cyan-50 border border-blue-100 rounded-3xl p-6 shadow-lg">
+                <h2 className="text-xl font-bold text-slate-700 mb-3">
+                  4 Hours TAT
+                </h2>
+                <p className="text-2xl font-extrabold text-blue-700">{result4}</p>
+              </div>
+
+              <div className="bg-gradient-to-br from-blue-50 to-cyan-50 border border-blue-100 rounded-3xl p-6 shadow-lg">
+                <h2 className="text-xl font-bold text-slate-700 mb-3">
+                  24 Hours TAT
+                </h2>
+                <p className="text-2xl font-extrabold text-blue-700">{result24}</p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-10 text-sm text-slate-500 text-center border-t pt-6">
+          Working Hours: Monday to Saturday | 10:00 AM - 7:00 PM
+        </div>
+      </div>
+    </div>
+  );
+}
